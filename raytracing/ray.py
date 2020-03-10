@@ -20,6 +20,7 @@ class Ray:
         # position
         self.z = z
         self.apertureDiameter = float("+Inf")
+        self.opticalDistance = 0
         self.isBlocked = isBlocked
 
     @property

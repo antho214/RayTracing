@@ -124,6 +124,7 @@ class Rays:
 
     def __iter__(self):
         self.iteration = 0
+
         self.progressLog = 10000
         return self
 
@@ -243,7 +244,7 @@ class LambertianRays(Rays):
         super(LambertianRays, self).__init__(rays=rays)
 
 class RandomRays(Rays):
-    def __init__(self, yMax=1.0, yMin=None, thetaMax=pi/2, thetaMin=None, maxCount=100000):
+    def __init__(self, yMax=1.0, yMin=None, thetaMax=pi/2, thetaMin=None, maxCount=100000, seed=None):
         self.maxCount = maxCount
         self.yMax = yMax
         self.yMin = yMin
@@ -253,7 +254,19 @@ class RandomRays(Rays):
         self.thetaMin = thetaMin
         if thetaMin is None:
             self.thetaMin = -thetaMax
+        self.seed = seed
+    
         super(RandomRays, self).__init__(rays=None)
+
+    def __iter__(self):
+        super(RandomRays, self).__init__(rays=None)
+
+        if self.seed is None:
+            self.seed = os.getpid() # We seed only when needed
+        random.seed(self.seed)
+
+        self.progressLog = 10000
+        return self
 
     def __len__(self) -> int:
         return self.maxCount
