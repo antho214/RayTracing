@@ -68,11 +68,15 @@ from .matrixgroup import *
 
 """ Ray matrices for geometrical optics """
 from .ray import *
+from .rays import *
 from .imagingpath import *
 
 """ ABCD matrices for gaussian beams """
 from .gaussianbeam import *
 from .laserpath import *
+
+""" Matrices for components: System4f (synonym: Telescope), System2f """
+from .components import *
 
 """ Specialty lenses : objectives and achromats, but we keep the namespace for the vendor lenses """
 from .specialtylenses import *
@@ -90,6 +94,6 @@ Element = Matrix
 Group = MatrixGroup
 OpticalPath = ImagingPath
 
-__version__ = "1.1.11"
+__version__ = "1.2.2"
 __author__ = "Daniel Cote <dccote@cervo.ulaval.ca>"
 

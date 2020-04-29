@@ -1,13 +1,15 @@
 from .ray import *
 from .gaussianbeam import *
+from .rays import *
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import matplotlib.path as mpath
 import matplotlib.transforms as transforms
-
 import math
 
+import time
+import tempfile 
 
 class Matrix(object):
     """A matrix and an optical element that can transform a ray or another
@@ -139,11 +141,11 @@ class Matrix(object):
         outputRay = Ray()
         outputRay.y = self.A * rightSideRay.y + self.B * rightSideRay.theta
         outputRay.theta = self.C * rightSideRay.y + self.D * rightSideRay.theta
-
+        
         outputRay.z = self.L + rightSideRay.z
         outputRay.apertureDiameter = self.apertureDiameter
 
-        if abs(outputRay.y) > abs(self.apertureDiameter / 2.0):
+        if abs(rightSideRay.y) > abs(self.apertureDiameter / 2.0):
             outputRay.isBlocked = True
         else:
             outputRay.isBlocked = rightSideRay.isBlocked
@@ -157,7 +159,7 @@ class Matrix(object):
         """
         q = rightSideBeam.q
         if rightSideBeam.n != self.frontIndex:
-            print("Warning: the gaussian beam is not tracking the index of refraction properly")
+            print("Warning: the gaussian beam is not tracking the index of refraction properly {0} {1}".format(rightSideBeam.n, self.frontIndex))
 
         qprime = (complex(self.A) * q + complex(self.B) ) / (complex(self.C)*q + complex(self.D))
         
@@ -205,9 +207,32 @@ class Matrix(object):
 
         return [self]
 
+    def lagrangeInvariant(self, ray1, ray2, z=0):
+        """ The Lagrange invariant is a quantity that is conserved
+        for any two rays in the system. It is often seen with the
+        chief ray and marginal ray in an imaging system, but it is
+        actually very general and any rays can be used. 
+        In ImagingPath(), if no rays are provided, the chief and 
+        marginal rays are used.
+
+        This quantity is L = n (y1 theta2 - y2 theta1) 
+        """
+
+        matrix = self.transferMatrix(upTo=z)
+
+        outputRay1 = matrix.traceThrough(ray1)
+        outputRay2 = matrix.traceThrough(ray2)
+
+        return matrix.backIndex * (outputRay1.theta * outputRay2.y - outputRay1.y * outputRay2.theta)
+
     def trace(self, ray):
         """Returns a list of rays (i.e. a ray trace) for the input ray through the matrix.
         
+        Mutiplying the ray by the transfer matrix will give the correct ray
+        but will not consider apertures.  By "tracing" a ray, we do consider
+        all apertures in the system.  If a ray is blocked, its property
+        isBlocked will be true, and isNotBlocked will be false.
+
         Because we want to manage blockage by apertures, we need to perform a two-step process
         for elements that have a finite, non-null length: where is the ray blocked exactly?
         It can be blocked at the entrance, at the exit, or anywhere in between.
@@ -228,18 +253,131 @@ class Matrix(object):
 
         return rayTrace
 
-    def traceMany(self, inputRays):
-        """ Trace each ray from a list from front edge of element to
-        the back edge.
+    def traceThrough(self, inputRay):
+        """ Returns the last ray after propagating through the system, 
+        including apertures.
+        
+        Contrary to trace(), this only returns the last ray.
+        Mutiplying the ray by the transfer matrix will give the correct ray
+        but will not consider apertures.  By "tracing" a ray, we do consider
+        all apertures in the system.  If a ray is blocked, its property
+        isBlocked will be true, and isNotBlocked will be false.
 
-        Returns a list of ray traces for each input ray.
+        """
+
+        rayTrace = self.trace(inputRay)
+        return rayTrace[-1]
+
+    def traceMany(self, inputRays):
+        """ Trace each ray from a group of rays from front edge of element to
+        the back edge. It can be either a list of Ray(), or a Rays() object:
+        the Rays() object is an iterator and can be used like a list.
+        
+        Returns a list of Ray() (i,e. a raytrace), one for each input ray.
         See trace().
         """
         manyRayTraces = []
         for inputRay in inputRays:
             rayTrace = self.trace(inputRay)
             manyRayTraces.append(rayTrace)
+    
         return manyRayTraces
+
+    def traceManyThrough(self, inputRays, progress=True):
+        """ Trace each ray from a list or a Rays() distribution from 
+        front edge of element to the back edge.
+        Input can be either a list of Ray(), or a Rays() object:
+        the Rays() object is an iterator and can be used like a list.
+        UniformRays, LambertianRays() etc... can be used.
+        
+        We assume that if the user passed a Rays() as input,
+        they will want a Rays() as output. Otherwise, returns a list of 
+        Ray(), one for each input ray.
+        """
+        
+        if not isinstance(inputRays, Rays) and isinstance(inputRays, list):
+            inputRays = Rays(inputRays)
+
+        outputRays = Rays()
+
+        for ray in inputRays:
+            lastRay = self.traceThrough(ray)
+            if lastRay.isNotBlocked:
+                outputRays.append(lastRay)
+            
+            if progress:
+                inputRays.displayProgress()
+
+        return outputRays
+
+    def traceManyThroughInParallel(self, inputRays, progress=True, processes=8):
+        """ This is an advanced technique to gain from parallel computation:
+        it is the same as traceManyThrough(), but splits this call in
+        several other parallel processes using the fork() command (not available
+        on Windows): the process clones itself and creates a child and keeps the parent.
+        The benefits are simple: if you create 8 processes on 8 CPU cores,
+        you gain a factor of 8 in speed. We are not talking GPU acceleration,
+        but still: 1 minute is shorter than 8 minutes.
+
+        The strategy is relatively simple: split the computation in several
+        processes, save the results to file, then read the results back into a single
+        Rays() object that will naturally combine all results from all runs.
+        """
+
+        outputRays = Rays()
+
+        childs = []
+        childPID = -1
+        tmpDir = tempfile.gettempdir()
+        if progress:
+            print("Attempting parallel computation, combining {0} groups".format(processes))
+
+        while len(childs) < processes and childPID != 0:
+            try:
+                childPID = os.fork() # Read about fork() to understand: code splits here
+            except:
+                return self.traceManyThrough(inputRays) # Give up on fork(): do just one.
+
+            if childPID == 0:    # Child process, compute, save, exit
+                outputRays = self.traceManyThrough(inputRays)
+                filePath = os.path.join(tmpDir, "rays-{0}.dat".format(os.getpid()))
+                outputRays.save(filePath)
+                exit(0)
+            else:                # Parent process keeps track of child, loop
+                childs.append(childPID)
+
+        # Only parent process gets here to gather everything (the child always exit()) 
+        if progress:
+            print("Waiting for childs for complete")
+        os.waitpid(0, 0)
+        time.sleep(1)
+
+        allRays = Rays()
+        for pid in childs:
+            try:
+                filePath = os.path.join(tmpDir, "rays-{0}.dat".format(pid))
+                self._waitForFile(filePath) # FIXME: Files are not always ready?
+                allRays.load(filePath, append=True)
+                os.remove(filePath)
+            except Exception as exception:
+                print("{1}: {0}".format(filePath,exception))
+
+        return allRays
+
+    def _waitForFile(self, filePath, timeout=5):
+        # Internal function for validating files with parallel computations
+        while not os.path.exists(filePath):
+            time.sleep(0.1)
+
+        oldSize = None
+        while True:
+            currentSize = os.path.getsize(filePath)
+            if currentSize == oldSize:
+                break
+            time.sleep(0.1)
+            oldSize = currentSize
+        time.sleep(0.1)
+
 
     @property
     def isImaging(self):
@@ -431,7 +569,7 @@ class Matrix(object):
 
         return self
 
-    def display(self):
+    def display(self): # pragma: no cover
         """ Display this component, without any ray tracing but with 
         all of its cardinal points and planes. If the component has no
         power (i.e. C == 0) this will fail.
@@ -456,7 +594,7 @@ class Matrix(object):
         plt.ioff()
         plt.show()
 
-    def drawAt(self, z, axes, showLabels=False):
+    def drawAt(self, z, axes, showLabels=False): # pragma: no cover
         """ Draw element on plot with starting edge at 'z'.
 
         Default is a black box of appropriate length.
@@ -470,23 +608,26 @@ class Matrix(object):
                               transform=axes.transData, clip_on=True)
         axes.add_patch(p)
 
-    def drawVertices(self, z, axes):
+    def drawVertices(self, z, axes): # pragma: no cover
         """ Draw vertices of the system """
         axes.plot([z+self.frontVertex, z+self.backVertex], [0, 0], 'ko', markersize=4, color="0.5", linewidth=0.2)
         halfHeight = self.displayHalfHeight()
         axes.text(z+self.frontVertex, 0, '$V_f$',ha='center', va='bottom',clip_box=axes.bbox, clip_on=True)
         axes.text(z+self.backVertex, 0, '$V_b$',ha='center', va='bottom',clip_box=axes.bbox, clip_on=True)
 
-    def drawCardinalPoints(self, z, axes):
+    def drawCardinalPoints(self, z, axes): # pragma: no cover
         """ Draw the focal points of a thin lens as black dots """
         (f1, f2) = self.focusPositions(z)
         axes.plot([f1, f2], [0, 0], 'ko', markersize=4, color='k', linewidth=0.4)
 
-    def drawPrincipalPlanes(self, z, axes):
+    def drawPrincipalPlanes(self, z, axes): # pragma: no cover
         """ Draw the principal planes """
         halfHeight = self.displayHalfHeight()
         (p1, p2) = self.principalPlanePositions(z=z)
 
+        if p1 is None or p2 is None:
+            return
+            
         axes.plot([p1, p1], [-halfHeight, halfHeight], linestyle='--', color='k', linewidth=1)
         axes.plot([p2, p2], [-halfHeight, halfHeight], linestyle='--', color='k', linewidth=1)
         axes.text(p1, halfHeight*1.2, '$P_f$',ha='center', va='bottom',clip_box=axes.bbox, clip_on=True)
@@ -528,7 +669,7 @@ class Matrix(object):
         axes.text((self.backVertex+F2)/2, -h, 'BFL = {0:0.1f}'.format(BFL),
             ha='center', va='bottom',clip_box=axes.bbox, clip_on=True)
 
-    def drawLabels(self, z, axes):
+    def drawLabels(self, z, axes): # pragma: no cover
         """ Draw element labels on plot with starting edge at 'z'.
 
         Labels are drawn 50% above the display height
@@ -544,7 +685,7 @@ class Matrix(object):
                      fontsize=8, xycoords='data', ha='center',
                      va='bottom',clip_box=axes.bbox, clip_on=True)
 
-    def drawPointsOfInterest(self, z, axes):
+    def drawPointsOfInterest(self, z, axes): # pragma: no cover
         """
         Labels of general points of interest are drawn below the
         axis, at 25% of the largest diameter.
@@ -566,7 +707,7 @@ class Matrix(object):
                          xycoords='data', fontsize=12,
                          ha='center', va='bottom')
 
-    def drawAperture(self, z, axes):
+    def drawAperture(self, z, axes): # pragma: no cover
         """ Draw the aperture size for this element.  Any element may 
         have a finite aperture size, so this function is general for all elements.
         """
@@ -637,6 +778,7 @@ class Matrix(object):
             description += "\nf = +inf (afocal)\n"
         return description
 
+
 class Lens(Matrix):
     """A thin lens of focal f, null thickness and infinite or finite diameter
 
@@ -650,7 +792,7 @@ class Lens(Matrix):
                                    backVertex=0,
                                    label=label)
 
-    def drawAt(self, z, axes, showLabels=False):
+    def drawAt(self, z, axes, showLabels=False): # pragma: no cover
         """ Draw a thin lens at z """
 
         halfHeight = self.displayHalfHeight() # real units, i.e. data
@@ -727,7 +869,7 @@ class Space(Matrix):
                                     apertureDiameter=diameter,
                                     label=label)
 
-    def drawAt(self, z, axes, showLabels=False):
+    def drawAt(self, z, axes, showLabels=False): # pragma: no cover
         """ Draw nothing because free space is nothing. """
         return
 
@@ -765,6 +907,37 @@ class DielectricInterface(Matrix):
                                                   frontIndex=n1,
                                                   backIndex=n2,
                                                   label=label)
+
+    def drawAt(self, z, axes, showLabels=False): # pragma: no cover
+        """ Draw a curved surface starting at 'z'.
+        We are not able yet to determine the color to fill with.
+        It is possible to draw a
+        quadratic bezier curve that looks like an arc, see:
+        https://pomax.github.io/bezierinfo/#circles_cubic
+
+        """
+        h = self.displayHalfHeight()
+        
+        # For simplicity, 1 is front, 2 is back.
+        # For details, see https://pomax.github.io/bezierinfo/#circles_cubic
+        v1 = z + self.frontVertex
+        phi1 = math.asin(h/abs(self.R))
+        delta1 = self.R*(1.0-math.cos(phi1))
+        ctl1 = abs((1.0-math.cos(phi1))/math.sin(phi1)*self.R)
+        corner1 = v1 + delta1
+
+        Path = mpath.Path
+        p = patches.PathPatch(
+            Path([(corner1, -h), (v1, -ctl1), (v1, 0), 
+                  (v1, 0), (v1, ctl1), (corner1, h)],
+                 [Path.MOVETO, Path.CURVE3, Path.CURVE3,
+                  Path.LINETO, Path.CURVE3, Path.CURVE3]),
+            fill=False,
+            transform=axes.transData)
+
+        axes.add_patch(p)
+        if showLabels:
+            self.drawLabels(z,axes)
 
     def flipOrientation(self):
         """ We flip the element around (as in, we turn a lens around front-back).
@@ -809,7 +982,7 @@ class ThickLens(Matrix):
                                         backVertex=thickness,
                                         label=label)
 
-    def drawAt(self, z, axes, showLabels=False):
+    def drawAt(self, z, axes, showLabels=False): # pragma: no cover
         """ Draw a faint blue box with slightly curved interfaces
         of length 'thickness' starting at 'z'.
 
@@ -856,7 +1029,7 @@ class ThickLens(Matrix):
         if showLabels:
             self.drawLabels(z,axes)
 
-    def drawAperture(self, z, axes):
+    def drawAperture(self, z, axes): # pragma: no cover
         """ Draw the aperture size for this element.
         The thick lens requires special care because the corners are not
         separated by self.L: the curvature makes the edges shorter.
@@ -909,7 +1082,7 @@ class DielectricSlab(ThickLens):
                                              diameter=diameter,
                                              label=label)
 
-    def drawAt(self, z, axes, showLabels=False):
+    def drawAt(self, z, axes, showLabels=False): # pragma: no cover
         """ Draw a faint blue box of length L starting at 'z'.
 
         """
