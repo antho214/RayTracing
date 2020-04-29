@@ -201,6 +201,8 @@ expected {1:.4}".format(BFL, fb, self.label))
 
 
 class Objective(MatrixGroup):
+    warningDisplayed = False
+
     def __init__(self, f, NA, focusToFocusLength, backAperture, workingDistance, url=None, label=''):
         """ General microscope objective, approximately correct.
 
@@ -220,7 +222,7 @@ class Objective(MatrixGroup):
         self.focusToFocusLength = focusToFocusLength
         self.backAperture = backAperture
         self.workingDistance = workingDistance
-        self.frontAperture = (NA * workingDistance)
+        self.frontAperture = 2*(NA * workingDistance)
         self.isFlipped = False
         self.url = url
 
@@ -236,6 +238,13 @@ class Objective(MatrixGroup):
         
         self.frontVertex = 0
         self.backVertex = focusToFocusLength - workingDistance
+        self.apertureDiameter = backAperture
+
+        if not Objective.warningDisplayed:
+            print("Warning: Objective class not fully tested. \
+No guarantee that apertures and field of view will exactly \
+reproduce the objective.")
+            Objective.warningDisplayed = True
 
     def pointsOfInterest(self, z):
         """ List of points of interest for this element as a dictionary:
@@ -267,17 +276,24 @@ class Objective(MatrixGroup):
             z = z + element.L
         return self
 
+    def drawAperture(self, z, axes):
+        # This MatrixGroup is special: we want to use apertureDiameter as the back aperture
+        # but we don't want to draw it becuase it looks like garbage.  Each element will
+        # draw its own aperture, so that is ok.
+        return
+
     def drawAt(self, z, axes, showLabels=False):
         L = self.focusToFocusLength
         f = self.f
         wd = self.workingDistance
         halfHeight = self.backAperture/2
+        shoulder = halfHeight/self.NA
 
         points = [[0, halfHeight],
-                  [(L - 5*wd), halfHeight],
+                  [(L - shoulder), halfHeight],
                   [(L - wd), self.frontAperture/2],
                   [(L - wd), -self.frontAperture/2],
-                  [(L - 5*wd), -halfHeight],
+                  [(L - shoulder), -halfHeight],
                   [0, -halfHeight]]
 
         if self.isFlipped:
